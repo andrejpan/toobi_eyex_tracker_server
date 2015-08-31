@@ -12,9 +12,8 @@ Getting minimal fixation data from the Tobii EyeX Controller and sending through
 Make sure that you running **MinimalFixationDataStream** project and not some other project inside Visual Studio Solution. Run the project and fixation data is going to be printed in console. Server will start sending data when the first client will connect to it.
 
 ## TODO 
-- fix 
--- printig
--- while true loops in threat
+- fix prints at console
+- fix while true loops in thread
 
 ## VirtualBox 5.X.Y tips
 
