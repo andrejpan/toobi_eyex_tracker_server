@@ -3,13 +3,15 @@
 *
 * Copyright 2013-2014 Tobii Technology AB. All rights reserved.
 *
-* Added a simple tcp/ip sending server, refernce 
+* Added a simple tcp/ip sending server, refernce
 * https://msdn.microsoft.com/en-us/library/windows/desktop/ms737593%28v=vs.85%29.aspx
 */
 
 //sockets
 #undef UNICODE
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 
 #include <Windows.h>
 #include <stdio.h>
@@ -21,6 +23,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdlib.h>
+
+//threads
+#include <process.h> /* _beginthread() */
 
 #pragma comment (lib, "Tobii.EyeX.Client.lib")
 //sockets
@@ -41,37 +46,125 @@ SOCKET ClientSocket = INVALID_SOCKET;
 SOCKET ListenSocket = INVALID_SOCKET;
 // 0 disconected, 1 connected
 int client_state = 0;
+//1 thread running, 0 thread kill 
+int end_threat = 1;
 
-void close_client_socket()
+void handle(void *pParam)
 {
-	if (shutdown(ClientSocket, SD_SEND) == SOCKET_ERROR) {
-		printf("shutdown failed with error: %d\n", WSAGetLastError());
+	// sockets
+	WSADATA wsaData;
+	int iResult;
+
+	struct addrinfo *result = NULL;
+	struct addrinfo hints;
+
+	while (end_threat == 1)
+	{ 
+		// Initialize Winsock
+		iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+		if (iResult != 0) {
+			printf("WSAStartup failed with error: %d\n", iResult);
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		ZeroMemory(&hints, sizeof(hints));
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_STREAM; // connection oriented TCP protocol
+		hints.ai_protocol = IPPROTO_TCP;
+		hints.ai_flags = AI_PASSIVE;
+
+		// Resolve the server address and port
+		iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+		if (iResult != 0) {
+			printf("getaddrinfo failed with error: %d\n", iResult);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		// Create a SOCKET for connecting to server
+		ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+		if (ListenSocket == INVALID_SOCKET) {
+			printf("socket failed with error: %ld\n", WSAGetLastError());
+			freeaddrinfo(result);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		// Setup the TCP listening socket
+		iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+		if (iResult == SOCKET_ERROR) {
+			printf("bind failed with error: %d\n", WSAGetLastError());
+			freeaddrinfo(result);
+			closesocket(ListenSocket);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		freeaddrinfo(result);
+
+		iResult = listen(ListenSocket, SOMAXCONN);
+		if (iResult == SOCKET_ERROR) {
+			printf("listen failed with error: %d\n", WSAGetLastError());
+			closesocket(ListenSocket);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		printf("Waiting for a client\n");
+		ClientSocket = accept(ListenSocket, NULL, NULL);
+
+		if (ClientSocket == INVALID_SOCKET) {
+			printf("accept failed with error: %d\n", WSAGetLastError());
+			closesocket(ListenSocket);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		printf("Client accepted\n");
+		// end sockets
+
+		client_state = 1;
+
+		while (client_state == 1)
+			{ }
+	
+		if (shutdown(ClientSocket, SD_SEND) == SOCKET_ERROR) {
+			printf("shutdown failed with error: %d\n", WSAGetLastError());
+			closesocket(ClientSocket);
+			WSACleanup();
+			// _endthread given to terminate
+			_endthread();
+		}
+
+		// cleanup
 		closesocket(ClientSocket);
-		WSACleanup();
-		return 1;
-	}
-
-	// disable sending to client
-	client_state = 2;
-}
-
-void accept_client()
-{
-	// Accept a client socket
-	ClientSocket = accept(ListenSocket, NULL, NULL);
-
-	if (ClientSocket == INVALID_SOCKET) {
-		printf("accept failed with error: %d\n", WSAGetLastError());
 		closesocket(ListenSocket);
 		WSACleanup();
-		return 1;
+
+		printf("Client has just discnected\n");
 	}
 
-	printf("Client accepted\n");
-	
-		// enable sending data to client
-	client_state = 1;
+	if (shutdown(ClientSocket, SD_SEND) == SOCKET_ERROR) {
+		printf("shutdown failed with error: %d\n", WSAGetLastError());
+	}
+
+	// cleanup
+	closesocket(ClientSocket);
+	closesocket(ListenSocket);
+	WSACleanup();
+
+	printf("Threat is exiting!\n");
+	// _endthread given to terminate
+	_endthread();
 }
+
+
 
 /*
 * Initializes g_hGlobalInteractorSnapshot with an interactor that has the Fixation Data behavior.
@@ -124,7 +217,7 @@ void TX_CALLCONVENTION OnEngineConnectionStateChanged(TX_CONNECTIONSTATE connect
 		}
 		else
 		{
-			printf("Waiting for fixation data to start streaming...\n");
+			printf("Waiting for fixation data to start streaming...\n\n");
 		}
 	}
 									   break;
@@ -152,14 +245,15 @@ void TX_CALLCONVENTION OnEngineConnectionStateChanged(TX_CONNECTIONSTATE connect
 */
 void OnFixationDataEvent(TX_HANDLE hFixationDataBehavior)
 {
-	//sockets
-	char szBuff[35];
-	char gazeXbuff[13];
-	char gazeYbuff[13];
 
 	TX_FIXATIONDATAEVENTPARAMS eventParams;
 	TX_FIXATIONDATAEVENTTYPE eventType;
 	char* eventDescription;
+
+	//sockets
+	char gazeXbuff[13];
+	char gazeYbuff[13];
+	char szBuff[35];
 
 	if (txGetFixationDataEventParams(hFixationDataBehavior, &eventParams) == TX_RESULT_OK) {
 		eventType = eventParams.EventType;
@@ -168,7 +262,8 @@ void OnFixationDataEvent(TX_HANDLE hFixationDataBehavior)
 			: ((eventType == TX_FIXATIONDATAEVENTTYPE_END) ? "End"
 				: "Begin");
 
-		printf("Fixation %s: (%.1f, %.1f) timestamp %.0f ms\n", eventDescription, eventParams.X, eventParams.Y, eventParams.Timestamp);
+		printf("\r                                                                      ");
+		printf("\rFixation %s: (%.1f, %.1f) timestamp %.0f ms", eventDescription, eventParams.X, eventParams.Y, eventParams.Timestamp);
 
 		// client is connected, we can start sending data
 		if (client_state == 1)
@@ -177,7 +272,7 @@ void OnFixationDataEvent(TX_HANDLE hFixationDataBehavior)
 			_snprintf(gazeXbuff, sizeof(gazeXbuff), "%i", (int)eventParams.X);
 			_snprintf(gazeYbuff, sizeof(gazeYbuff), "%i", (int)eventParams.Y);
 			strcpy(szBuff, gazeXbuff);
-			strcat(szBuff, ":");
+			strcat(szBuff, " ");
 			strcat(szBuff, gazeYbuff);
 			//printf("%s\n", szBuff);
 
@@ -188,15 +283,17 @@ void OnFixationDataEvent(TX_HANDLE hFixationDataBehavior)
 
 				printf("send failed with error: %d\n", WSAGetLastError());
 				// clossing client connection
-				close_client_socket();
+				//close_client_socket();
+				client_state = 0;
 			}
 			else
 			{
-				printf("Bytes Sent: %ld\n", iResult);
+				printf("\r                                                                      ");
+				printf("\rBytes sent: %ld", iResult);
 			}
 		}
 	}
-	else 
+	else
 	{
 		printf("Failed to interpret fixation data event packet.\n");
 	}
@@ -237,68 +334,12 @@ int main(int argc, char* argv[])
 	TX_TICKET hEventHandlerTicket = TX_INVALID_TICKET;
 	BOOL success;
 
-	// sockets
-	WSADATA wsaData;
-	int iResult;
-
-	struct addrinfo *result = NULL;
-	struct addrinfo hints;
-
-	int iSendResult;
-	char recvbuf[DEFAULT_BUFLEN];
-	int recvbuflen = DEFAULT_BUFLEN;
-
-	// Initialize Winsock
-	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (iResult != 0) {
-		printf("WSAStartup failed with error: %d\n", iResult);
+	uintptr_t thread;
+	thread = _beginthread(handle, 0, NULL);
+	if (thread == -1) {
+		fprintf(stderr, "Couldn't create thread: %d\n", GetLastError());
 		return 1;
 	}
-
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
-
-	// Resolve the server address and port
-	iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-	if (iResult != 0) {
-		printf("getaddrinfo failed with error: %d\n", iResult);
-		WSACleanup();
-		return 1;
-	}
-
-	// Create a SOCKET for connecting to server
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-	if (ListenSocket == INVALID_SOCKET) {
-		printf("socket failed with error: %ld\n", WSAGetLastError());
-		freeaddrinfo(result);
-		WSACleanup();
-		return 1;
-	}
-
-	// Setup the TCP listening socket
-	iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-	if (iResult == SOCKET_ERROR) {
-		printf("bind failed with error: %d\n", WSAGetLastError());
-		freeaddrinfo(result);
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
-
-	freeaddrinfo(result);
-
-	iResult = listen(ListenSocket, SOMAXCONN);
-	if (iResult == SOCKET_ERROR) {
-		printf("listen failed with error: %d\n", WSAGetLastError());
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
-	// end sockets
-
 
 	// initialize and enable the context that is our link to the EyeX Engine.
 	success = txInitializeEyeX(TX_EYEXCOMPONENTOVERRIDEFLAG_NONE, NULL, NULL, NULL, NULL) == TX_RESULT_OK;
@@ -316,20 +357,11 @@ int main(int argc, char* argv[])
 		printf("Initialization failed.\n");
 	}
 
-	//
-	accept_client();
 
 	printf("Press any key to exit...\n");
 	_getch();
-	printf("Exiting.\n");
-
-	// shutdown the connection since we're done
-	close_client_socket();
-
-	// cleanup
-	closesocket(ClientSocket);
-	closesocket(ListenSocket);
-	WSACleanup();	
+	end_threat = 0;
+	printf("\nExiting.\n");
 
 	// disable and delete the context.
 	txDisableConnection(hContext);
